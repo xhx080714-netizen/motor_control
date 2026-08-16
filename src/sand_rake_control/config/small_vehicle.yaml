@@ -1,0 +1,49 @@
+teleop_node:
+  ros__parameters:
+    # Commissioning limits, not motor specifications from follow_iou_c.
+    linear_speed: 0.10
+    angular_speed: 0.50
+    max_linear_speed_mps: 0.15
+    max_angular_speed_rps: 0.80
+    key_timeout_sec: 0.50
+
+safety_controller:
+  ros__parameters:
+    cmd_timeout_sec: 0.50
+    watchdog_margin_sec: 0.01
+
+chassis_controller:
+  ros__parameters:
+    # follow_iou_c/include/config.h
+    wheel_radius_m: 0.135
+    effective_track_width_m: 0.54
+    gear_ratio: 7.5
+    max_motor_rpm: 1500.0
+    min_motor_rpm: 30.0
+    control_rate_hz: 50.0
+    cmd_timeout_sec: 0.50
+    # Conservative commissioning limits retained below the reference motor
+    # envelope. They must be retuned from raised-wheel and ground tests.
+    max_linear_speed_mps: 0.15
+    max_angular_speed_rps: 0.80
+    max_linear_accel_mps2: 0.30
+    max_angular_accel_rps2: 1.50
+
+chassis_mock:
+  ros__parameters:
+    # Mirror the authoritative small-car physical parameters above.
+    wheel_radius_m: 0.135
+    effective_track_width_m: 0.54
+    gear_ratio: 7.5
+    max_motor_rpm: 1500.0
+    min_motor_rpm: 30.0
+    simulation_rate_hz: 50.0
+    command_timeout_sec: 0.50
+    left_gain: 1.0
+    right_gain: 1.0
+    motor_time_constant_sec: 0.0
+    rpm_noise_stddev: 0.0
+    path_publish_divider: 5
+    max_path_points: 5000
+    odom_frame: odom
+    base_frame: base_link
