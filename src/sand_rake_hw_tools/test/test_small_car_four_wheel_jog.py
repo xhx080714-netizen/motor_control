@@ -60,8 +60,18 @@ def common_execute_arguments(device, extra):
 
 MODE_REQUEST = with_crc([0x01, 0x03, 0x00, 0x08, 0x00, 0x01])
 STATE_REQUEST = with_crc([0x01, 0x03, 0x00, 0x00, 0x00, 0x02])
+FULL_STATUS_REQUEST = with_crc([0x01, 0x03, 0x00, 0x00, 0x00, 0x0C])
 MODE_RESPONSE = with_crc([0x01, 0x03, 0x02, 0x00, 0x01])
 STATE_RESPONSE = with_crc([0x01, 0x03, 0x04, 0x01, 0xE1, 0x00, 0x00])
+FULL_STATUS_RESPONSE = with_crc([
+    0x01, 0x03, 0x18,
+    0x01, 0xE1, 0x00, 0x00,
+    0x00, 0x00, 0xFC, 0x55,
+    0x00, 0x00, 0x3A, 0x5B,
+    0x01, 0xF4, 0x00, 0x64,
+    0x00, 0x01, 0x00, 0xEE,
+    0x00, 0x00, 0x01, 0x0F,
+])
 COAST_FRAME = with_crc([0x01, 0x10, 0x00, 0x00, 0x00, 0x00])
 M1_FORWARD_FRAME = with_crc([0x01, 0x10, 0x01, 0xE1, 0x00, 0x00])
 INITIALIZATION_FRAMES = [
@@ -124,13 +134,12 @@ def test_dry_run(production_executable):
     require_lines(
         process.stdout,
         [
-            "protocol_source=FOLLOW_IOU_C",
+            "protocol_source=MOTOR_REGISTER_TABLE_V4",
             "board=rear",
             "connector=JP18",
             "expected_device=/dev/ttyS1",
             "motor=M2",
-            "expected_side_from_reference=left",
-            "direction=reference_reverse_state_2",
+            "direction=table_reverse_state_2",
             "rpm=100",
             "duration_ms=300",
             "planned_jog=" + " ".join(f"{byte:02X}" for byte in expected_jog),
@@ -185,9 +194,10 @@ def test_initialize_dry_run(production_executable):
     require_lines(
         process.stdout,
         [
-            "operation=FOLLOW_IOU_INITIALIZE",
+            "operation=REGISTER_TABLE_V4_INITIALIZE",
             "function=0x06_WRITE_SINGLE_NO_ACK_READ",
-            "initialization_order=REFERENCE_MOTOR_INIT",
+            "initialization_order=EXISTING_FIRMWARE_SEQUENCE",
+            "response_handling=NO_ACK_READ_MATCH_EXISTING_FIRMWARE",
             "planned_pre_coast=" + " ".join(f"{byte:02X}" for byte in COAST_FRAME),
             "planned_init_clear_alarm="
             + " ".join(f"{byte:02X}" for byte in INITIALIZATION_FRAMES[0]),
@@ -235,11 +245,11 @@ def test_status_only(test_executable):
     try:
         answer_read_preflight(master_fd)
         state_request = read_exact(master_fd, 8, time.monotonic() + 2.0)
-        if state_request != STATE_REQUEST:
+        if state_request != FULL_STATUS_REQUEST:
             raise RuntimeError(
                 f"unexpected status request: {state_request.hex(' ')}"
             )
-        os.write(master_fd, STATE_RESPONSE)
+        os.write(master_fd, FULL_STATUS_RESPONSE)
         output, _ = process.communicate(timeout=2.0)
     finally:
         close_process(process, master_fd, slave_fd)
@@ -251,8 +261,25 @@ def test_status_only(test_executable):
             "operation=READ_SMALL_CAR_STATUS_ONLY",
             "function=0x03_READ_ONLY",
             "mode_raw=0x0001",
-            "state_slot_0_raw=0x01E1",
-            "state_slot_1_raw=0x0000",
+            "m1_state_raw=0x01E1",
+            "m1_state_rpm=30",
+            "m1_state_code=1",
+            "m1_state=FORWARD",
+            "m2_state_raw=0x0000",
+            "m2_state_rpm=0",
+            "m2_state_code=0",
+            "m2_state=FREE_STOP",
+            "m1_hall_count_raw=0x0000FC55",
+            "m1_hall_count=64597",
+            "m2_hall_count_raw=0x00003A5B",
+            "m2_hall_count=14939",
+            "m1_feedback_rpm=500",
+            "m2_feedback_rpm=100",
+            "status_mode_raw=0x0001",
+            "bus_voltage_raw=0x00EE",
+            "bus_voltage_mv=23800",
+            "alarm_code_raw=0x0000",
+            "program_version_raw=0x010F",
             "write_operations=NOT_EXECUTED",
             "result=OK",
         ],
@@ -293,8 +320,8 @@ def test_jog_sequence(test_executable):
             "mode_raw=0x0001",
             "pre_coast_write=OK",
             "jog_write=OK",
-            "state_slot_0_raw=0x01E1",
-            "state_slot_1_raw=0x0000",
+            "m1_state_raw=0x01E1",
+            "m2_state_raw=0x0000",
             "final_coast_write=OK",
             "final_coast_result=OK",
             "result=OK",

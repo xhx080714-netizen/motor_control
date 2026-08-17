@@ -10,7 +10,7 @@
 #include "std_srvs/srv/trigger.hpp"
 
 #include "sand_rake_control/safety_state_machine.hpp"
-#include "sand_rake_control/msg/safety_event.hpp"
+#include "sand_rake_interfaces/msg/safety_event.hpp"
 
 using namespace std::chrono_literals;
 
@@ -42,7 +42,7 @@ public:
         std::placeholders::_1));
 
     safety_event_sub_ =
-      this->create_subscription<sand_rake_control::msg::SafetyEvent>(
+      this->create_subscription<sand_rake_interfaces::msg::SafetyEvent>(
       "/safety/event",
       10,
       std::bind(
@@ -136,7 +136,7 @@ private:
   }
 
   void safety_event_callback(
-    const sand_rake_control::msg::SafetyEvent::SharedPtr msg)
+    const sand_rake_interfaces::msg::SafetyEvent::SharedPtr msg)
   {
     const auto previous_state =
       state_machine_.get_state();
@@ -262,7 +262,7 @@ private:
     geometry_msgs::msg::Twist>::SharedPtr cmd_sub_;
 
   rclcpp::Subscription<
-    sand_rake_control::msg::SafetyEvent>::SharedPtr
+    sand_rake_interfaces::msg::SafetyEvent>::SharedPtr
     safety_event_sub_;
 
   rclcpp::Publisher<

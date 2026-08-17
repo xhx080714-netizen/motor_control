@@ -12,7 +12,7 @@ TEST(ModbusRtu, BuildsSmallCarModeReadFrame)
     expected);
 }
 
-TEST(ModbusRtu, BuildsCompleteFollowIouInitializationFrames)
+TEST(ModbusRtu, BuildsCompanyTableInitializationFrames)
 {
   EXPECT_EQ(
     modbus::build_write_single_register_request(0x01, 0x0009, 0x0001),

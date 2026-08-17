@@ -21,7 +21,8 @@ namespace
 {
 constexpr std::uint8_t kSlaveAddress = 0x01;
 constexpr std::uint8_t kDualMotorFunction = 0x10;
-constexpr std::uint16_t kMotorStateStartRegister = 0x0000;
+constexpr std::uint16_t kStatusStartRegister = 0x0000;
+constexpr std::uint16_t kStatusRegisterCount = 12;
 constexpr std::uint16_t kMotorStateRegisterCount = 2;
 constexpr std::uint16_t kModeReadRegister = 0x0008;
 constexpr std::uint16_t kSingleRegister = 1;
@@ -136,16 +137,10 @@ const char * motor_string(Motor motor)
   return motor == Motor::kM1 ? "M1" : "M2";
 }
 
-const char * expected_side_string(Motor motor)
-{
-  // follow_iou_c/src/main.c calls motor_set_rpm(m_r, m_l).
-  return motor == Motor::kM1 ? "right" : "left";
-}
-
 const char * direction_string(Direction direction)
 {
   return direction == Direction::kReferenceForward ?
-         "reference_forward_state_1" : "reference_reverse_state_2";
+         "table_forward_state_1" : "table_reverse_state_2";
 }
 
 std::uint16_t pack_motor_word(std::uint16_t rpm, std::uint16_t state)
@@ -200,7 +195,7 @@ void print_usage(const char * program)
     "       --direction forward|reverse] [--rpm 30|60|100] [--timeout-ms N]\n"
     "       [--execute --device PATH --confirm-wheels-off-ground\n"
     "        --confirm-hardware-stop-ready --confirm-exclusive-tty]\n\n"
-    "Small-car protocol from follow_iou_c: each board controls M1/M2 with\n"
+    "Small-car protocol from company register table V4: each board controls M1/M2 with\n"
     "an 8-byte 01 10 <M1 word> <M2 word> CRC frame. Default mode is\n"
     "dry-run. Jog duration is fixed at 300 ms; rpm is restricted to\n"
     "30, 60, or 100.\n";
@@ -367,6 +362,40 @@ void print_hex_word(const char * label, std::uint16_t value)
     std::setfill('0') << std::setw(4) << value << std::dec << '\n';
 }
 
+void print_hex_dword(const char * label, std::uint32_t value)
+{
+  std::cout << label << "=0x" << std::hex << std::uppercase <<
+    std::setfill('0') << std::setw(8) << value << std::dec << '\n';
+}
+
+const char * motor_state_string(std::uint16_t state)
+{
+  switch (state) {
+    case 0:
+      return "FREE_STOP";
+    case 1:
+      return "FORWARD";
+    case 2:
+      return "REVERSE";
+    case 3:
+      return "BRAKE_STOP";
+    case 4:
+      return "DECELERATE_TO_ZERO";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+void print_motor_word(const char * prefix, std::uint16_t value)
+{
+  const std::string label_prefix(prefix);
+  print_hex_word((label_prefix + "_raw").c_str(), value);
+  std::cout <<
+    label_prefix << "_rpm=" << (value >> 4U) << '\n' <<
+    label_prefix << "_code=" << (value & 0x000FU) << '\n' <<
+    label_prefix << '=' << motor_state_string(value & 0x000FU) << '\n';
+}
+
 bool device_allowed(const BoardProfile & profile, const std::string & device)
 {
   if (kPtyTestBuild) {
@@ -491,7 +520,7 @@ int main(int argc, char ** argv)
 
   std::cout <<
     "tool=SMALL_CAR_DUAL_BOARD_DUAL_MOTOR_JOG_ONCE\n" <<
-    "protocol_source=FOLLOW_IOU_C\n" <<
+    "protocol_source=MOTOR_REGISTER_TABLE_V4\n" <<
     "board=" << board_string(*options.board) << '\n' <<
     "connector=" << profile.connector << '\n' <<
     "wheel_group=" << profile.wheel_group << '\n' <<
@@ -506,24 +535,22 @@ int main(int argc, char ** argv)
       "operation=COAST_BOTH_MOTORS\n" <<
       "function=0x10_CUSTOM_DUAL_MOTOR\n" <<
       "motor_word=RPM_SHIFT_LEFT_4_OR_STATE\n" <<
-      "response_handling=NO_ACK_READ_MATCH_REFERENCE\n";
+      "response_handling=NO_ACK_READ_MATCH_EXISTING_FIRMWARE\n";
   } else if (options.initialize) {
     std::cout <<
-      "operation=FOLLOW_IOU_INITIALIZE\n" <<
+      "operation=REGISTER_TABLE_V4_INITIALIZE\n" <<
       "function=0x06_WRITE_SINGLE_NO_ACK_READ\n" <<
-      "initialization_order=REFERENCE_MOTOR_INIT\n" <<
-      "response_handling=NO_ACK_READ_MATCH_REFERENCE\n";
+      "initialization_order=EXISTING_FIRMWARE_SEQUENCE\n" <<
+      "response_handling=NO_ACK_READ_MATCH_EXISTING_FIRMWARE\n";
   } else {
     std::cout <<
       "operation=SINGLE_MOTOR_JOG\n" <<
       "function=0x10_CUSTOM_DUAL_MOTOR\n" <<
       "motor_word=RPM_SHIFT_LEFT_4_OR_STATE\n" <<
-      "response_handling=NO_ACK_READ_MATCH_REFERENCE\n" <<
+      "response_handling=NO_ACK_READ_MATCH_EXISTING_FIRMWARE\n" <<
       "motor=" << motor_string(*options.motor) << '\n' <<
-      "expected_side_from_reference=" <<
-      expected_side_string(*options.motor) << '\n' <<
       "direction=" << direction_string(*options.direction) << '\n' <<
-      "direction_semantics=REFERENCE_STATE_NOT_PHYSICAL_MAPPING\n" <<
+      "direction_semantics=REGISTER_TABLE_STATE_NOT_PHYSICAL_MAPPING\n" <<
       "rpm=" << options.jog_rpm << '\n' <<
       "duration_ms=" << kJogDurationMs << '\n';
   }
@@ -597,20 +624,38 @@ int main(int argc, char ** argv)
   }
 
   if (options.status_only) {
-    const auto state_result = client.read_holding_registers(
-      kSlaveAddress, kMotorStateStartRegister, kMotorStateRegisterCount);
-    if (!state_result) {
+    const auto status_result = client.read_holding_registers(
+      kSlaveAddress, kStatusStartRegister, kStatusRegisterCount);
+    if (!status_result) {
       std::cerr <<
         "result=ERROR\n" <<
-        "stage=motor_state\n" <<
+        "stage=full_status\n" <<
         "transaction_error=" <<
-        sand_rake_control::transaction_error_string(state_result.error) << '\n';
+        sand_rake_control::transaction_error_string(status_result.error) << '\n';
       return 5;
     }
+    const auto & values = status_result.values;
+    const std::uint32_t m1_hall_count =
+      (static_cast<std::uint32_t>(values.at(2)) << 16U) | values.at(3);
+    const std::uint32_t m2_hall_count =
+      (static_cast<std::uint32_t>(values.at(4)) << 16U) | values.at(5);
     std::cout <<
-      "motor_state_latency_us=" << state_result.latency.count() << '\n';
-    print_hex_word("state_slot_0_raw", state_result.values.at(0));
-    print_hex_word("state_slot_1_raw", state_result.values.at(1));
+      "full_status_latency_us=" << status_result.latency.count() << '\n';
+    print_motor_word("m1_state", values.at(0));
+    print_motor_word("m2_state", values.at(1));
+    print_hex_dword("m1_hall_count_raw", m1_hall_count);
+    std::cout << "m1_hall_count=" << m1_hall_count << '\n';
+    print_hex_dword("m2_hall_count_raw", m2_hall_count);
+    std::cout << "m2_hall_count=" << m2_hall_count << '\n';
+    std::cout <<
+      "m1_feedback_rpm=" << values.at(6) << '\n' <<
+      "m2_feedback_rpm=" << values.at(7) << '\n';
+    print_hex_word("status_mode_raw", values.at(8));
+    print_hex_word("bus_voltage_raw", values.at(9));
+    std::cout << "bus_voltage_mv=" <<
+      static_cast<std::uint32_t>(values.at(9)) * 100U << '\n';
+    print_hex_word("alarm_code_raw", values.at(10));
+    print_hex_word("program_version_raw", values.at(11));
     std::cout <<
       "write_operations=NOT_EXECUTED\n" <<
       "result=OK\n";
@@ -659,9 +704,8 @@ int main(int argc, char ** argv)
     }
 
     if (result_code == 0) {
-      // The reference firmware does not consume 0x06/0x10 responses. Allow
-      // delayed bytes from the final writes to arrive before the Modbus read
-      // transaction discards input and requests the current mode.
+      // Existing firmware does not consume 0x06/0x10 responses. Allow delayed
+      // bytes to arrive before the Modbus read discards input and checks mode.
       std::this_thread::sleep_for(
         std::chrono::milliseconds(kPostInitializationQuietMs));
       if (!read_expected(
@@ -692,7 +736,7 @@ int main(int argc, char ** argv)
     result_code = 130;
   } else {
     const auto state_result = client.read_holding_registers(
-      kSlaveAddress, kMotorStateStartRegister, kMotorStateRegisterCount);
+      kSlaveAddress, kStatusStartRegister, kMotorStateRegisterCount);
     if (!state_result) {
       std::cerr <<
         "stage=motor_state\n" <<
@@ -704,8 +748,8 @@ int main(int argc, char ** argv)
     } else {
       std::cout <<
         "motor_state_latency_us=" << state_result.latency.count() << '\n';
-      print_hex_word("state_slot_0_raw", state_result.values.at(0));
-      print_hex_word("state_slot_1_raw", state_result.values.at(1));
+      print_motor_word("m1_state", state_result.values.at(0));
+      print_motor_word("m2_state", state_result.values.at(1));
       const int remaining_delay_ms = kJogDurationMs - kStateSampleDelayMs -
         static_cast<int>(
         std::chrono::duration_cast<std::chrono::milliseconds>(

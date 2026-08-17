@@ -1,0 +1,17 @@
+# Camera interface parameters frozen on Day 5.
+# Runtime use is pending D's camera_adapter implementation.
+
+front_camera:
+  camera_adapter_node:
+    ros__parameters:
+      rtsp_url: "rtsp://192.168.1.188:554/ch01.264"
+      frame_id: "front_camera_optical_frame"
+      publish_rate: 15.0
+
+rear_camera:
+  camera_adapter_node:
+    ros__parameters:
+      rtsp_url: "rtsp://192.168.1.103:554/ch01.264"
+      frame_id: "rear_camera_optical_frame"
+      publish_rate: 15.0
+

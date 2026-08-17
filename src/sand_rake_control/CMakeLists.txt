@@ -11,20 +11,19 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-find_package(builtin_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(sand_rake_interfaces REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(Threads REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/SafetyEvent.msg"
   "msg/WheelRpm.msg"
-  DEPENDENCIES builtin_interfaces std_msgs
+  DEPENDENCIES std_msgs
 )
 
 rosidl_get_typesupport_target(cpp_typesupport_target
@@ -89,6 +88,7 @@ add_executable(safety_controller
 ament_target_dependencies(safety_controller
   rclcpp
   geometry_msgs
+  sand_rake_interfaces
   std_srvs
 )
 
@@ -154,6 +154,7 @@ install(
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_cmake_lint_cmake REQUIRED)
   find_package(ament_cmake_uncrustify REQUIRED)
   find_package(ament_cmake_xmllint REQUIRED)
@@ -200,6 +201,13 @@ if(BUILD_TESTING)
   target_link_libraries(test_rs232_transport
     rs232_transport
     Threads::Threads
+  )
+
+  ament_add_pytest_test(test_safety_integration
+    test/test_safety_integration.py
+    TIMEOUT 90
+    ENV
+      "SAND_RAKE_SAFETY_CONTROLLER=$<TARGET_FILE:safety_controller>"
   )
 
 endif()
