@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <stdexcept>
 
 #include "sand_rake_control/diff_drive_kinematics.hpp"
@@ -16,6 +17,27 @@ TEST(DiffDriveKinematics, RejectsInvalidGeometry)
     std::invalid_argument);
   EXPECT_THROW(
     DiffDriveKinematics(0.1, 0.5, 7.5, 1500.0, 1501.0),
+    std::invalid_argument);
+}
+
+TEST(DiffDriveKinematics, RejectsNonFiniteParameters)
+{
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double infinity = std::numeric_limits<double>::infinity();
+  EXPECT_THROW(
+    DiffDriveKinematics(nan, 0.5, 7.5, 1500.0, 30.0),
+    std::invalid_argument);
+  EXPECT_THROW(
+    DiffDriveKinematics(0.1, infinity, 7.5, 1500.0, 30.0),
+    std::invalid_argument);
+  EXPECT_THROW(
+    DiffDriveKinematics(0.1, 0.5, nan, 1500.0, 30.0),
+    std::invalid_argument);
+  EXPECT_THROW(
+    DiffDriveKinematics(0.1, 0.5, 7.5, infinity, 30.0),
+    std::invalid_argument);
+  EXPECT_THROW(
+    DiffDriveKinematics(0.1, 0.5, 7.5, 1500.0, nan),
     std::invalid_argument);
 }
 
@@ -36,7 +58,7 @@ TEST(DiffDriveKinematics, LeftTurnMakesRightSideFaster)
 
 TEST(DiffDriveKinematics, RpmConversionRoundTrips)
 {
-  DiffDriveKinematics kinematics(0.135, 0.54, 7.5, 1500.0, 30.0);
+  DiffDriveKinematics kinematics(0.134665, 0.53907, 7.5, 1500.0, 30.0);
   const double input = 0.15;
   const double recovered =
     kinematics.motor_rpm_to_linear(kinematics.linear_to_motor_rpm(input));
@@ -55,7 +77,7 @@ TEST(DiffDriveKinematics, ScalesAllWheelsToMotorLimit)
 
 TEST(DiffDriveKinematics, MatchesFollowIouRpmQuantization)
 {
-  DiffDriveKinematics kinematics(0.135, 0.54, 7.5, 1500.0, 30.0);
+  DiffDriveKinematics kinematics(0.134665, 0.53907, 7.5, 1500.0, 30.0);
 
   const auto rounded_to_zero = kinematics.command_to_motor_rpm(
     kinematics.motor_rpm_to_linear(0.5), 0.0);

@@ -14,9 +14,10 @@ safety_controller:
 
 chassis_controller:
   ros__parameters:
-    # follow_iou_c/include/config.h
-    wheel_radius_m: 0.135
-    effective_track_width_m: 0.54
+    # Measured including the tire: diameter 269.33 mm, track width 539.07 mm.
+    # Measured wheelbase is 858 mm; differential-drive kinematics does not use it.
+    wheel_radius_m: 0.134665
+    effective_track_width_m: 0.53907
     gear_ratio: 7.5
     max_motor_rpm: 1500.0
     min_motor_rpm: 30.0
@@ -31,9 +32,9 @@ chassis_controller:
 
 chassis_mock:
   ros__parameters:
-    # Mirror the authoritative small-car physical parameters above.
-    wheel_radius_m: 0.135
-    effective_track_width_m: 0.54
+    # Mirror the measured small-car physical parameters above.
+    wheel_radius_m: 0.134665
+    effective_track_width_m: 0.53907
     gear_ratio: 7.5
     max_motor_rpm: 1500.0
     min_motor_rpm: 30.0

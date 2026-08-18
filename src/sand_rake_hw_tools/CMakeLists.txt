@@ -30,6 +30,14 @@ install(
 
 if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_package(ament_cmake_flake8 REQUIRED)
+  find_package(ament_cmake_lint_cmake REQUIRED)
+  find_package(ament_cmake_uncrustify REQUIRED)
+  find_package(ament_cmake_xmllint REQUIRED)
+  ament_flake8(test/test_small_car_four_wheel_jog.py)
+  ament_lint_cmake(CMakeLists.txt)
+  ament_uncrustify(src)
+  ament_xmllint(package.xml)
   enable_testing()
   add_executable(small_car_four_wheel_jog_once_pty_test
     src/small_car_four_wheel_jog_once.cpp

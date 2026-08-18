@@ -1,9 +1,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <stdexcept>
+#include <string>
 
 #include "geometry_msgs/msg/twist.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -24,11 +27,14 @@ public:
   {
     cmd_timeout_sec_ =
       this->declare_parameter<double>("cmd_timeout_sec", 0.5);
-    if (cmd_timeout_sec_ <= 0.0) {
-      throw std::invalid_argument("cmd_timeout_sec must be positive");
+    if (!std::isfinite(cmd_timeout_sec_) || cmd_timeout_sec_ <= 0.0) {
+      throw std::invalid_argument("cmd_timeout_sec must be finite and positive");
     }
     watchdog_margin_sec_ =
       this->declare_parameter<double>("watchdog_margin_sec", 0.01);
+    if (!std::isfinite(watchdog_margin_sec_) || watchdog_margin_sec_ < 0.0) {
+      throw std::invalid_argument("watchdog_margin_sec must be finite and non-negative");
+    }
     watchdog_margin_sec_ = std::clamp(
       watchdog_margin_sec_, 0.0, cmd_timeout_sec_ * 0.25);
 
@@ -98,6 +104,12 @@ public:
   }
 
 private:
+  struct SafetySourceState
+  {
+    std::int64_t stamp_ns{0};
+    bool active{false};
+  };
+
   bool is_zero_command(
     const geometry_msgs::msg::Twist & msg) const
   {
@@ -115,6 +127,25 @@ private:
   void cmd_callback(
     const geometry_msgs::msg::Twist::SharedPtr msg)
   {
+    const bool command_is_finite =
+      std::isfinite(msg->linear.x) &&
+      std::isfinite(msg->linear.y) &&
+      std::isfinite(msg->linear.z) &&
+      std::isfinite(msg->angular.x) &&
+      std::isfinite(msg->angular.y) &&
+      std::isfinite(msg->angular.z);
+    if (!command_is_finite) {
+      latest_cmd_ = geometry_msgs::msg::Twist();
+      cmd_timeout_active_ = true;
+      state_machine_.update_motion_command(true);
+      watchdog_timer_->cancel();
+      cmd_pub_->publish(geometry_msgs::msg::Twist());
+      RCLCPP_ERROR_THROTTLE(
+        this->get_logger(), *get_clock(), 2000,
+        "Rejected non-finite teleop command and forced zero velocity.");
+      return;
+    }
+
     latest_cmd_ = *msg;
 
     received_cmd_ = true;
@@ -138,20 +169,52 @@ private:
   void safety_event_callback(
     const sand_rake_interfaces::msg::SafetyEvent::SharedPtr msg)
   {
+    const std::int64_t event_stamp_ns =
+      static_cast<std::int64_t>(msg->stamp.sec) * 1000000000LL +
+      static_cast<std::int64_t>(msg->stamp.nanosec);
+    const std::string source_id =
+      msg->source_id.empty() ? "<legacy>" : msg->source_id;
+    const std::string source_key =
+      source_id + ":" + std::to_string(msg->reason);
+    auto & source_state = safety_sources_[source_key];
+    if (!msg->stop && event_stamp_ns != 0 &&
+      source_state.stamp_ns != 0 && event_stamp_ns < source_state.stamp_ns)
+    {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "Ignored out-of-order safety clear event from source=%s, reason=%u.",
+        source_id.c_str(), static_cast<unsigned int>(msg->reason));
+      return;
+    }
+    if (event_stamp_ns > source_state.stamp_ns) {
+      source_state.stamp_ns = event_stamp_ns;
+    }
+    source_state.active = msg->stop;
+
+    const bool any_stop_active = std::any_of(
+      safety_sources_.begin(), safety_sources_.end(),
+      [](const auto & item) {return item.second.active;});
+
     const auto previous_state =
       state_machine_.get_state();
 
     state_machine_.update_stop_condition(
-      msg->stop);
+      any_stop_active);
+
+    if (any_stop_active) {
+      cmd_pub_->publish(geometry_msgs::msg::Twist());
+    }
 
     const auto current_state =
       state_machine_.get_state();
 
     RCLCPP_INFO(
       this->get_logger(),
-      "Safety event received: stop=%s, reason=%u",
+      "Safety event received: source=%s, stop=%s, reason=%u, any_stop=%s",
+      source_id.c_str(),
       msg->stop ? "true" : "false",
-      static_cast<unsigned int>(msg->reason));
+      static_cast<unsigned int>(msg->reason),
+      any_stop_active ? "true" : "false");
 
     if (current_state != previous_state) {
       RCLCPP_WARN(
@@ -163,8 +226,9 @@ private:
     if (!msg->stop) {
       RCLCPP_INFO(
         this->get_logger(),
-        "Stop condition cleared, "
-        "but latched state requires manual reset.");
+        any_stop_active ?
+        "One stop source cleared; another stop source remains active." :
+        "All stop sources cleared, but latched state requires manual reset.");
     }
   }
 
@@ -257,6 +321,7 @@ private:
 
   bool received_cmd_;
   bool cmd_timeout_active_;
+  std::map<std::string, SafetySourceState> safety_sources_;
 
   rclcpp::Subscription<
     geometry_msgs::msg::Twist>::SharedPtr cmd_sub_;

@@ -15,8 +15,10 @@
 - 控制字为 `rpm << 4 | state`，状态 0/1/2/3/4 分别是自由停车、正转、
   反转、刹车停车、减速到零；
 - 默认 dry-run，真实执行必须确认车辆架空、硬件停机手段和 tty 独占；
-- 单电机点动仅允许 30/60/100 rpm，持续 300 ms，另一电机保持自由停车；
+- 单电机点动仅允许 30/50/60/100 rpm，持续 300 ms，另一电机保持自由停车；
 - 动作前后及收到中断时均尝试发送双电机自由停车。
+- 点动期间从 `0x0000` 起读取全部 12 个状态寄存器，便于同时判断命令状态、
+  霍尔、反馈转速、模式、母线电压、报警和程序版本。
 
 `--status-only` 先检查模式，再读取 `0x0000～0x000B`，输出 M1/M2 命令状态、
 两路霍尔累计值、两路反馈转速、模式、母线电压、报警码和程序版本，全程不写入。
@@ -36,25 +38,27 @@ M2 减速时间为 0。现有固件路径发送 `0x06` 后不读取回显；工�
 cd /home/rockchip/sand_rake_ws
 source /opt/ros/humble/setup.bash
 
-CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --symlink-install \
+MAKEFLAGS="-j1" CMAKE_BUILD_PARALLEL_LEVEL=1 \
+  colcon build --symlink-install \
   --executor sequential --parallel-workers 1 \
   --packages-select sand_rake_interfaces
 
 source install/setup.bash
-CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --symlink-install \
+MAKEFLAGS="-j1" CMAKE_BUILD_PARALLEL_LEVEL=1 \
+  colcon build --symlink-install \
   --executor sequential --parallel-workers 1 \
   --packages-select sand_rake_control
 
 source install/setup.bash
-CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --symlink-install \
+MAKEFLAGS="-j1" CMAKE_BUILD_PARALLEL_LEVEL=1 \
+  colcon build --symlink-install \
   --executor sequential --parallel-workers 1 \
   --packages-select sand_rake_hw_tools
 
 source install/setup.bash
-colcon test --executor sequential --parallel-workers 1 \
-  --packages-select sand_rake_interfaces sand_rake_control sand_rake_hw_tools
+CTEST_PARALLEL_LEVEL=1 colcon test --executor sequential --parallel-workers 1 --packages-select sand_rake_interfaces sand_rake_control sand_rake_hw_tools
 colcon test-result --verbose
 ```
 
-三条构建命令必须前后执行；上一条成功结束后才能开始下一条，禁止在多个终端中
-同时构建。
+三条命令使用包间和包内完全串行构建。上一条成功结束后才能手动开始下一条，
+禁止在多个终端中同时构建。

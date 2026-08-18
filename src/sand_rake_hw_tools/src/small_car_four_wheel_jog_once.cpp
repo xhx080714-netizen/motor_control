@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -12,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "sand_rake_control/modbus_rtu.hpp"
 #include "sand_rake_control/modbus_rtu_client.hpp"
@@ -23,7 +23,6 @@ constexpr std::uint8_t kSlaveAddress = 0x01;
 constexpr std::uint8_t kDualMotorFunction = 0x10;
 constexpr std::uint16_t kStatusStartRegister = 0x0000;
 constexpr std::uint16_t kStatusRegisterCount = 12;
-constexpr std::uint16_t kMotorStateRegisterCount = 2;
 constexpr std::uint16_t kModeReadRegister = 0x0008;
 constexpr std::uint16_t kSingleRegister = 1;
 constexpr std::uint16_t kCoastState = 0;
@@ -36,6 +35,7 @@ constexpr int kReferenceWriteDelayMs = 2;
 constexpr int kPostInitializationQuietMs = 20;
 constexpr int kDefaultTimeoutMs = 100;
 constexpr int kMaximumTimeoutMs = 1000;
+constexpr int kMaximumProtocolRpm = 0x0FFF;
 
 struct InitializationStep
 {
@@ -51,14 +51,13 @@ constexpr std::array<InitializationStep, 5> kInitializationSteps{{
   {"init_m1_decel_zero", 0x0005, 0x0000},
   {"init_m2_decel_zero", 0x0006, 0x0000},
 }};
-#if defined(SAND_RAKE_HW_TOOLS_TEST_ALLOW_PTY) || \
-  defined(SAND_RAKE_HW_TOOLS_TEST_CONFIRMED_PROFILE)
+#if defined(SAND_RAKE_HW_TOOLS_TEST_ALLOW_PTY)
 constexpr bool kPtyTestBuild = true;
 #else
 constexpr bool kPtyTestBuild = false;
 #endif
 
-std::atomic<bool> g_stop_requested{false};
+volatile std::sig_atomic_t g_stop_requested = 0;
 
 enum class Board
 {
@@ -116,7 +115,7 @@ struct SendResult
 
 void handle_stop_signal(int)
 {
-  g_stop_requested.store(true);
+  g_stop_requested = 1;
 }
 
 BoardProfile board_profile(Board board)
@@ -192,16 +191,17 @@ void print_usage(const char * program)
     "Usage: " << program <<
     " --board front|rear [--status-only | --coast-only | --initialize |\n"
     "       --motor M1|M2\n"
-    "       --direction forward|reverse] [--rpm 30|60|100] [--timeout-ms N]\n"
+    "       --direction forward|reverse] [--rpm 30|50|60|100] [--timeout-ms N]\n"
     "       [--execute --device PATH --confirm-wheels-off-ground\n"
     "        --confirm-hardware-stop-ready --confirm-exclusive-tty]\n\n"
     "Small-car protocol from company register table V4: each board controls M1/M2 with\n"
     "an 8-byte 01 10 <M1 word> <M2 word> CRC frame. Default mode is\n"
     "dry-run. Jog duration is fixed at 300 ms; rpm is restricted to\n"
-    "30, 60, or 100.\n";
+    "30, 50, 60, or 100.\n";
 }
 
-bool parse_positive_integer(const std::string & text, int & value)
+bool parse_positive_integer(
+  const std::string & text, int & value, int maximum_value)
 {
   if (text.empty()) {
     return false;
@@ -210,7 +210,7 @@ bool parse_positive_integer(const std::string & text, int & value)
   errno = 0;
   const long parsed = std::strtol(text.c_str(), &end, 10);
   if (errno != 0 || end == text.c_str() || *end != '\0' ||
-    parsed <= 0 || parsed > kMaximumTimeoutMs ||
+    parsed <= 0 || parsed > maximum_value ||
     parsed > std::numeric_limits<int>::max())
   {
     return false;
@@ -278,7 +278,8 @@ bool parse_options(int argc, char ** argv, Options & options)
     }
     if (argument == "--timeout-ms") {
       if (++index >= argc ||
-        !parse_positive_integer(argv[index], options.timeout_ms))
+        !parse_positive_integer(
+          argv[index], options.timeout_ms, kMaximumTimeoutMs))
       {
         return false;
       }
@@ -287,8 +288,10 @@ bool parse_options(int argc, char ** argv, Options & options)
     if (argument == "--rpm") {
       int parsed_rpm = 0;
       if (++index >= argc ||
-        !parse_positive_integer(argv[index], parsed_rpm) ||
-        (parsed_rpm != 30 && parsed_rpm != 60 && parsed_rpm != 100))
+        !parse_positive_integer(
+          argv[index], parsed_rpm, kMaximumProtocolRpm) ||
+        (parsed_rpm != 30 && parsed_rpm != 50 &&
+        parsed_rpm != 60 && parsed_rpm != 100))
       {
         return false;
       }
@@ -396,6 +399,30 @@ void print_motor_word(const char * prefix, std::uint16_t value)
     label_prefix << '=' << motor_state_string(value & 0x000FU) << '\n';
 }
 
+void print_full_status_values(
+  const std::vector<std::uint16_t> & values)
+{
+  const std::uint32_t m1_hall_count =
+    (static_cast<std::uint32_t>(values.at(2)) << 16U) | values.at(3);
+  const std::uint32_t m2_hall_count =
+    (static_cast<std::uint32_t>(values.at(4)) << 16U) | values.at(5);
+  print_motor_word("m1_state", values.at(0));
+  print_motor_word("m2_state", values.at(1));
+  print_hex_dword("m1_hall_count_raw", m1_hall_count);
+  std::cout << "m1_hall_count=" << m1_hall_count << '\n';
+  print_hex_dword("m2_hall_count_raw", m2_hall_count);
+  std::cout << "m2_hall_count=" << m2_hall_count << '\n';
+  std::cout <<
+    "m1_feedback_rpm=" << values.at(6) << '\n' <<
+    "m2_feedback_rpm=" << values.at(7) << '\n';
+  print_hex_word("status_mode_raw", values.at(8));
+  print_hex_word("bus_voltage_raw", values.at(9));
+  std::cout << "bus_voltage_mv=" <<
+    static_cast<std::uint32_t>(values.at(9)) * 100U << '\n';
+  print_hex_word("alarm_code_raw", values.at(10));
+  print_hex_word("program_version_raw", values.at(11));
+}
+
 bool device_allowed(const BoardProfile & profile, const std::string & device)
 {
   if (kPtyTestBuild) {
@@ -483,7 +510,7 @@ bool interruptible_delay(int duration_ms)
   const auto deadline = std::chrono::steady_clock::now() +
     std::chrono::milliseconds(duration_ms);
   while (std::chrono::steady_clock::now() < deadline) {
-    if (g_stop_requested.load()) {
+    if (g_stop_requested != 0) {
       return false;
     }
     const auto remaining = deadline - std::chrono::steady_clock::now();
@@ -494,7 +521,7 @@ bool interruptible_delay(int duration_ms)
       std::this_thread::sleep_for(slice);
     }
   }
-  return !g_stop_requested.load();
+  return g_stop_requested == 0;
 }
 }  // namespace
 
@@ -617,6 +644,15 @@ int main(int argc, char ** argv)
   sand_rake_control::ModbusRtuClient client(
     transport, std::chrono::milliseconds(options.timeout_ms));
   if (!read_expected(client, "mode", kModeReadRegister, 0x0001)) {
+    if (g_stop_requested != 0 && !options.status_only) {
+      std::cerr << "stage=mode\nstop_requested=YES\n";
+      const bool final_coast_ok =
+        send_and_report(transport, "final_coast", coast_frame);
+      std::cout << "final_coast_result=" <<
+        (final_coast_ok ? "OK" : "FAILED") << '\n';
+      std::cerr << "result=ERROR\n";
+      return final_coast_ok ? 130 : 7;
+    }
     std::cerr <<
       "result=ERROR\n"
       "write_operations=NOT_EXECUTED\n";
@@ -634,32 +670,39 @@ int main(int argc, char ** argv)
         sand_rake_control::transaction_error_string(status_result.error) << '\n';
       return 5;
     }
-    const auto & values = status_result.values;
-    const std::uint32_t m1_hall_count =
-      (static_cast<std::uint32_t>(values.at(2)) << 16U) | values.at(3);
-    const std::uint32_t m2_hall_count =
-      (static_cast<std::uint32_t>(values.at(4)) << 16U) | values.at(5);
     std::cout <<
       "full_status_latency_us=" << status_result.latency.count() << '\n';
-    print_motor_word("m1_state", values.at(0));
-    print_motor_word("m2_state", values.at(1));
-    print_hex_dword("m1_hall_count_raw", m1_hall_count);
-    std::cout << "m1_hall_count=" << m1_hall_count << '\n';
-    print_hex_dword("m2_hall_count_raw", m2_hall_count);
-    std::cout << "m2_hall_count=" << m2_hall_count << '\n';
-    std::cout <<
-      "m1_feedback_rpm=" << values.at(6) << '\n' <<
-      "m2_feedback_rpm=" << values.at(7) << '\n';
-    print_hex_word("status_mode_raw", values.at(8));
-    print_hex_word("bus_voltage_raw", values.at(9));
-    std::cout << "bus_voltage_mv=" <<
-      static_cast<std::uint32_t>(values.at(9)) * 100U << '\n';
-    print_hex_word("alarm_code_raw", values.at(10));
-    print_hex_word("program_version_raw", values.at(11));
+    print_full_status_values(status_result.values);
     std::cout <<
       "write_operations=NOT_EXECUTED\n" <<
       "result=OK\n";
     return 0;
+  }
+
+  if (!options.coast_only && !options.initialize) {
+    const auto preflight_status = client.read_holding_registers(
+      kSlaveAddress, kStatusStartRegister, kStatusRegisterCount);
+    if (!preflight_status) {
+      std::cerr <<
+        "result=ERROR\n" <<
+        "stage=preflight_status\n" <<
+        "transaction_error=" <<
+        sand_rake_control::transaction_error_string(preflight_status.error) << '\n' <<
+        "write_operations=NOT_EXECUTED\n";
+      return 5;
+    }
+    std::cout <<
+      "preflight_status_latency_us=" << preflight_status.latency.count() << '\n';
+    print_full_status_values(preflight_status.values);
+    if (preflight_status.values.at(8) != 0x0001 ||
+      preflight_status.values.at(10) != 0x0000)
+    {
+      std::cerr <<
+        "result=BLOCKED\n" <<
+        "reason=PREFLIGHT_STATUS_NOT_SAFE\n" <<
+        "write_operations=NOT_EXECUTED\n";
+      return 5;
+    }
   }
 
   if (options.coast_only) {
@@ -677,7 +720,7 @@ int main(int argc, char ** argv)
       result_code = 6;
     } else {
       for (const auto & step : kInitializationSteps) {
-        if (g_stop_requested.load()) {
+        if (g_stop_requested != 0) {
           std::cerr <<
             "stage=" << step.stage << '\n' <<
             "stop_requested=YES\n";
@@ -726,35 +769,63 @@ int main(int argc, char ** argv)
   int result_code = 0;
   if (!send_and_report(transport, "pre_coast", coast_frame)) {
     result_code = 6;
-  } else if (g_stop_requested.load()) {
+  } else if (g_stop_requested != 0) {
     std::cerr << "stage=before_jog\nstop_requested=YES\n";
     result_code = 130;
-  } else if (!send_and_report(transport, "jog", jog_frame)) {
-    result_code = 6;
-  } else if (!interruptible_delay(kStateSampleDelayMs)) {
-    std::cerr << "stage=jog_delay\nstop_requested=YES\n";
-    result_code = 130;
   } else {
-    const auto state_result = client.read_holding_registers(
-      kSlaveAddress, kStatusStartRegister, kMotorStateRegisterCount);
-    if (!state_result) {
-      std::cerr <<
-        "stage=motor_state\n" <<
-        "transaction_error=" <<
-        sand_rake_control::transaction_error_string(state_result.error) << '\n' <<
-        "exception_code=" <<
-        static_cast<unsigned int>(state_result.exception_code) << '\n';
+    const auto jog_started_at = std::chrono::steady_clock::now();
+    const auto jog_deadline = jog_started_at +
+      std::chrono::milliseconds(kJogDurationMs);
+    if (!send_and_report(transport, "jog", jog_frame)) {
       result_code = 6;
+    } else if (!interruptible_delay(kStateSampleDelayMs)) {
+      std::cerr << "stage=jog_delay\nstop_requested=YES\n";
+      result_code = 130;
     } else {
-      std::cout <<
-        "motor_state_latency_us=" << state_result.latency.count() << '\n';
-      print_motor_word("m1_state", state_result.values.at(0));
-      print_motor_word("m2_state", state_result.values.at(1));
-      const int remaining_delay_ms = kJogDurationMs - kStateSampleDelayMs -
-        static_cast<int>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-          state_result.latency).count());
-      if (remaining_delay_ms > 0 && !interruptible_delay(remaining_delay_ms)) {
+      const auto now = std::chrono::steady_clock::now();
+      const auto remaining = jog_deadline - now;
+      const auto active_status_timeout =
+        std::min(
+        std::chrono::milliseconds(options.timeout_ms),
+        std::chrono::duration_cast<std::chrono::milliseconds>(remaining));
+      if (active_status_timeout.count() <= 0) {
+        std::cerr << "stage=active_status\ntransaction_error=jog deadline reached\n";
+        result_code = 6;
+      } else {
+        sand_rake_control::ModbusRtuClient active_status_client(
+          transport, active_status_timeout);
+        const auto active_status_result = active_status_client.read_holding_registers(
+          kSlaveAddress, kStatusStartRegister, kStatusRegisterCount);
+        if (!active_status_result) {
+          std::cerr <<
+            "stage=active_status\n" <<
+            "transaction_error=" <<
+            sand_rake_control::transaction_error_string(
+            active_status_result.error) << '\n' <<
+            "exception_code=" <<
+            static_cast<unsigned int>(active_status_result.exception_code) << '\n';
+          result_code = g_stop_requested != 0 ? 130 : 6;
+        } else {
+          std::cout <<
+            "active_status_latency_us=" <<
+            active_status_result.latency.count() << '\n';
+          print_full_status_values(active_status_result.values);
+          if (active_status_result.values.at(8) != 0x0001 ||
+            active_status_result.values.at(10) != 0x0000)
+          {
+            std::cerr <<
+              "stage=active_status\n" <<
+              "validation=UNSAFE_STATUS\n";
+            result_code = 6;
+          }
+        }
+      }
+
+      const auto remaining_after_status = std::chrono::duration_cast<
+        std::chrono::milliseconds>(jog_deadline - std::chrono::steady_clock::now());
+      if (remaining_after_status.count() > 0 &&
+        !interruptible_delay(static_cast<int>(remaining_after_status.count())))
+      {
         std::cerr << "stage=jog_delay\nstop_requested=YES\n";
         result_code = 130;
       }

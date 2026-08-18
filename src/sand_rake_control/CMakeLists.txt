@@ -214,6 +214,6 @@ endif()
 
 ament_export_include_directories(include)
 ament_export_targets(export_safety_state_machine)
-ament_export_dependencies(rosidl_default_runtime)
+ament_export_dependencies(rosidl_default_runtime Threads)
 
 ament_package()

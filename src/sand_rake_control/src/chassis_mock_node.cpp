@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <random>
 #include <stdexcept>
@@ -58,9 +59,9 @@ public:
   : Node("chassis_mock"), random_engine_(std::random_device{}())
   {
     const double wheel_radius_m =
-      declare_parameter<double>("wheel_radius_m", 0.135);
+      declare_parameter<double>("wheel_radius_m", 0.134665);
     const double effective_track_width_m =
-      declare_parameter<double>("effective_track_width_m", 0.54);
+      declare_parameter<double>("effective_track_width_m", 0.53907);
     const double gear_ratio = declare_parameter<double>("gear_ratio", 7.5);
     const double max_motor_rpm = declare_parameter<double>("max_motor_rpm", 1500.0);
     const double min_motor_rpm = declare_parameter<double>("min_motor_rpm", 30.0);
@@ -70,19 +71,38 @@ public:
     left_gain_ = declare_parameter<double>("left_gain", 1.0);
     right_gain_ = declare_parameter<double>("right_gain", 1.0);
     motor_time_constant_sec_ =
-      std::max(0.0, declare_parameter<double>("motor_time_constant_sec", 0.0));
+      declare_parameter<double>("motor_time_constant_sec", 0.0);
     rpm_noise_stddev_ =
-      std::max(0.0, declare_parameter<double>("rpm_noise_stddev", 0.0));
-    path_publish_divider_ = static_cast<int>(std::max<int64_t>(
-        1, declare_parameter<int64_t>("path_publish_divider", 5)));
-    max_path_points_ = static_cast<int>(std::max<int64_t>(
-        2, declare_parameter<int64_t>("max_path_points", 5000)));
+      declare_parameter<double>("rpm_noise_stddev", 0.0);
+    const auto path_publish_divider =
+      declare_parameter<int64_t>("path_publish_divider", 5);
+    const auto max_path_points =
+      declare_parameter<int64_t>("max_path_points", 5000);
     odom_frame_ = declare_parameter<std::string>("odom_frame", "odom");
     base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
 
-    if (simulation_rate_hz_ <= 0.0 || command_timeout_sec_ <= 0.0) {
-      throw std::invalid_argument("simulation rate and command timeout must be positive");
+    if (!std::isfinite(simulation_rate_hz_) || simulation_rate_hz_ <= 0.0 ||
+      !std::isfinite(command_timeout_sec_) || command_timeout_sec_ <= 0.0 ||
+      !std::isfinite(left_gain_) || !std::isfinite(right_gain_) ||
+      !std::isfinite(motor_time_constant_sec_) || motor_time_constant_sec_ < 0.0 ||
+      !std::isfinite(rpm_noise_stddev_) || rpm_noise_stddev_ < 0.0)
+    {
+      throw std::invalid_argument(
+              "mock rates, timeout, gains, motor time constant, and noise "
+              "must be finite and within their valid ranges");
     }
+    if (path_publish_divider < 1 ||
+      path_publish_divider > std::numeric_limits<int>::max() ||
+      max_path_points < 2 || max_path_points > std::numeric_limits<int>::max())
+    {
+      throw std::invalid_argument("mock path parameters are outside the supported range");
+    }
+    if (odom_frame_.empty() || base_frame_.empty() || odom_frame_ == base_frame_) {
+      throw std::invalid_argument("mock odom/base frames must be non-empty and distinct");
+    }
+    path_publish_divider_ = static_cast<int>(path_publish_divider);
+    max_path_points_ = static_cast<int>(max_path_points);
+    max_motor_rpm_ = max_motor_rpm;
 
     kinematics_ = std::make_unique<sand_rake_control::DiffDriveKinematics>(
       wheel_radius_m,
@@ -120,8 +140,22 @@ public:
 private:
   void wheel_cmd_callback(const sand_rake_control::msg::WheelRpm::SharedPtr msg)
   {
+    if (!msg->direction_valid ||
+      !std::isfinite(msg->left_front) || !std::isfinite(msg->left_rear) ||
+      !std::isfinite(msg->right_front) || !std::isfinite(msg->right_rear))
+    {
+      command_rpm_ = {};
+      command_received_ = false;
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Rejected invalid wheel RPM command and forced the mock target to zero.");
+      return;
+    }
     command_rpm_ = {
-      msg->left_front, msg->left_rear, msg->right_front, msg->right_rear};
+      std::clamp(msg->left_front, -max_motor_rpm_, max_motor_rpm_),
+      std::clamp(msg->left_rear, -max_motor_rpm_, max_motor_rpm_),
+      std::clamp(msg->right_front, -max_motor_rpm_, max_motor_rpm_),
+      std::clamp(msg->right_rear, -max_motor_rpm_, max_motor_rpm_)};
     command_received_ = true;
     last_command_time_ = std::chrono::steady_clock::now();
   }
@@ -155,6 +189,10 @@ private:
     message.pose.covariance[35] = 0.02;
     message.twist.covariance[0] = 0.02;
     message.twist.covariance[35] = 0.03;
+    for (const std::size_t index : {14U, 21U, 28U}) {
+      message.pose.covariance[index] = 1.0e6;
+      message.twist.covariance[index] = 1.0e6;
+    }
     return message;
   }
 
@@ -174,10 +212,14 @@ private:
       timed_out ? sand_rake_control::WheelRpmValues{} : command_rpm_;
 
     const sand_rake_control::WheelRpmValues gained_command{
-      safe_command.left_front * left_gain_,
-      safe_command.left_rear * left_gain_,
-      safe_command.right_front * right_gain_,
-      safe_command.right_rear * right_gain_};
+      std::clamp(
+        safe_command.left_front * left_gain_, -max_motor_rpm_, max_motor_rpm_),
+      std::clamp(
+        safe_command.left_rear * left_gain_, -max_motor_rpm_, max_motor_rpm_),
+      std::clamp(
+        safe_command.right_front * right_gain_, -max_motor_rpm_, max_motor_rpm_),
+      std::clamp(
+        safe_command.right_rear * right_gain_, -max_motor_rpm_, max_motor_rpm_)};
 
     actual_rpm_.left_front = update_motor(
       actual_rpm_.left_front, gained_command.left_front, dt);
@@ -263,6 +305,7 @@ private:
   double right_gain_{1.0};
   double motor_time_constant_sec_{0.0};
   double rpm_noise_stddev_{0.0};
+  double max_motor_rpm_{1500.0};
   int path_publish_divider_{5};
   int max_path_points_{5000};
   std::string odom_frame_{"odom"};

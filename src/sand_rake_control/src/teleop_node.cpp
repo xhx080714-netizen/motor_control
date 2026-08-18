@@ -1,8 +1,10 @@
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <functional>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 
 #include <fcntl.h>
 #include <termios.h>
@@ -13,6 +15,16 @@
 
 using namespace std::chrono_literals;
 
+namespace
+{
+volatile std::sig_atomic_t g_stop_requested = 0;
+
+void handle_stop_signal(int)
+{
+  g_stop_requested = 1;
+}
+}  // namespace
+
 class TeleopNode : public rclcpp::Node
 {
 public:
@@ -20,22 +32,25 @@ public:
   : Node("teleop_node")
   {
     // 1. 声明参数
-    const double max_linear_speed = std::abs(
-      this->declare_parameter<double>("max_linear_speed_mps", 0.15));
-    const double max_angular_speed = std::abs(
-      this->declare_parameter<double>("max_angular_speed_rps", 0.80));
-    linear_speed_ = std::abs(
-      this->declare_parameter<double>("linear_speed", 0.10));
-    angular_speed_ = std::abs(
-      this->declare_parameter<double>("angular_speed", 0.50));
+    const double max_linear_speed =
+      this->declare_parameter<double>("max_linear_speed_mps", 0.15);
+    const double max_angular_speed =
+      this->declare_parameter<double>("max_angular_speed_rps", 0.80);
+    linear_speed_ =
+      this->declare_parameter<double>("linear_speed", 0.10);
+    angular_speed_ =
+      this->declare_parameter<double>("angular_speed", 0.50);
     key_timeout_sec_ =
       this->declare_parameter<double>("key_timeout_sec", 0.5);
 
-    if (max_linear_speed <= 0.0 || max_angular_speed <= 0.0 ||
-      key_timeout_sec_ <= 0.0)
+    if (!std::isfinite(max_linear_speed) || max_linear_speed <= 0.0 ||
+      !std::isfinite(max_angular_speed) || max_angular_speed <= 0.0 ||
+      !std::isfinite(linear_speed_) || linear_speed_ <= 0.0 ||
+      !std::isfinite(angular_speed_) || angular_speed_ <= 0.0 ||
+      !std::isfinite(key_timeout_sec_) || key_timeout_sec_ <= 0.0)
     {
       throw std::invalid_argument(
-              "teleop speed limits and key timeout must be positive");
+              "teleop speeds, limits, and key timeout must be finite and positive");
     }
     if (linear_speed_ > max_linear_speed) {
       RCLCPP_WARN(
@@ -79,6 +94,12 @@ public:
   ~TeleopNode()
   {
     restore_terminal();
+  }
+
+  void publish_stop()
+  {
+    current_cmd_ = geometry_msgs::msg::Twist();
+    cmd_vel_pub_->publish(current_cmd_);
   }
 
 private:
@@ -230,12 +251,23 @@ private:
 
 int main(int argc, char * argv[])
 {
-  rclcpp::init(argc, argv);
+  rclcpp::init(
+    argc, argv, rclcpp::InitOptions(), rclcpp::SignalHandlerOptions::None);
+  std::signal(SIGINT, handle_stop_signal);
+  std::signal(SIGTERM, handle_stop_signal);
 
   auto node = std::make_shared<TeleopNode>();
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+  while (rclcpp::ok() && g_stop_requested == 0) {
+    executor.spin_some();
+    std::this_thread::sleep_for(10ms);
+  }
 
-  rclcpp::spin(node);
-
+  node->publish_stop();
+  executor.spin_some();
+  std::this_thread::sleep_for(50ms);
+  executor.remove_node(node);
   rclcpp::shutdown();
 
   return 0;

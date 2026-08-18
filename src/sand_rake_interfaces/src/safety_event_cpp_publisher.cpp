@@ -27,6 +27,7 @@ private:
     sand_rake_interfaces::msg::SafetyEvent message;
 
     message.stamp = this->now();
+    message.source_id = "safety_event_cpp_test";
     message.stop = true;
     message.reason =
       sand_rake_interfaces::msg::SafetyEvent::REASON_LASER;

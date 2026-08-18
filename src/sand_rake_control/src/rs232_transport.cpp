@@ -150,7 +150,7 @@ TransportResult Rs232Transport::wait_for(short events, Deadline deadline)
     }
     if (poll_result < 0) {
       if (errno == EINTR) {
-        continue;
+        return {TransportError::kInterrupted, 0, EINTR};
       }
       return {TransportError::kPollFailed, 0, errno};
     }
@@ -257,6 +257,8 @@ const char * transport_error_string(TransportError error) noexcept
       return "termios configuration failed";
     case TransportError::kTimeout:
       return "deadline timeout";
+    case TransportError::kInterrupted:
+      return "operation interrupted";
     case TransportError::kPollFailed:
       return "poll failed";
     case TransportError::kIoError:

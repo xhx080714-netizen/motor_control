@@ -24,6 +24,7 @@ from std_srvs.srv import Trigger
 COMMAND_PERIOD_SEC = 0.05
 FLOAT_TOLERANCE = 1.0e-6
 WATCHDOG_LIMIT_SEC = 0.500
+SAFETY_EVENT_LIMIT_SEC = 0.100
 
 
 @dataclass
@@ -97,6 +98,7 @@ class SafetyBlackBoxDriver(Node):
     def send_event(self, stop, reason):
         message = SafetyEvent()
         message.stamp = self.get_clock().now().to_msg()
+        message.source_id = "safety_integration_test"
         message.stop = stop
         message.reason = reason
         self.event_pub.publish(message)
@@ -419,6 +421,11 @@ class D3C7SafetyIntegration:
                 "No zero output observed",
             )
         latency_ms = (zero_sample[0] - event_time) * 1000.0
+        if zero_sample[0] - event_time > SAFETY_EVENT_LIMIT_SEC:
+            raise CaseFailure(
+                "LASER stop publishes zero within 100.0 ms",
+                "Stop latency %.1f ms" % latency_ms,
+            )
         return "LASER stop-to-zero latency: %.1f ms" % latency_ms
 
     def _test_latched_block(self):

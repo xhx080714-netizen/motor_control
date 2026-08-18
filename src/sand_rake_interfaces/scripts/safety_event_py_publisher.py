@@ -26,6 +26,7 @@ class SafetyEventPublisher(Node):
         message = SafetyEvent()
 
         message.stamp = self.get_clock().now().to_msg()
+        message.source_id = 'safety_event_py_test'
         message.stop = True
         message.reason = SafetyEvent.REASON_TIMEOUT
 

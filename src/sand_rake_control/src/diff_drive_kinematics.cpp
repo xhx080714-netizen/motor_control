@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace sand_rake_control
@@ -24,21 +25,24 @@ DiffDriveKinematics::DiffDriveKinematics(
   max_motor_rpm_(max_motor_rpm),
   min_motor_rpm_(min_motor_rpm)
 {
-  if (wheel_radius_m_ <= 0.0) {
-    throw std::invalid_argument("wheel_radius_m must be positive");
+  if (!std::isfinite(wheel_radius_m_) || wheel_radius_m_ <= 0.0) {
+    throw std::invalid_argument("wheel_radius_m must be finite and positive");
   }
-  if (effective_track_width_m_ <= 0.0) {
-    throw std::invalid_argument("effective_track_width_m must be positive");
-  }
-  if (gear_ratio_ <= 0.0) {
-    throw std::invalid_argument("gear_ratio must be positive");
-  }
-  if (max_motor_rpm_ <= 0.0) {
-    throw std::invalid_argument("max_motor_rpm must be positive");
-  }
-  if (min_motor_rpm_ < 0.0 || min_motor_rpm_ > max_motor_rpm_) {
+  if (!std::isfinite(effective_track_width_m_) || effective_track_width_m_ <= 0.0) {
     throw std::invalid_argument(
-            "min_motor_rpm must be in [0, max_motor_rpm]");
+            "effective_track_width_m must be finite and positive");
+  }
+  if (!std::isfinite(gear_ratio_) || gear_ratio_ <= 0.0) {
+    throw std::invalid_argument("gear_ratio must be finite and positive");
+  }
+  if (!std::isfinite(max_motor_rpm_) || max_motor_rpm_ <= 0.0) {
+    throw std::invalid_argument("max_motor_rpm must be finite and positive");
+  }
+  if (!std::isfinite(min_motor_rpm_) ||
+    min_motor_rpm_ < 0.0 || min_motor_rpm_ > max_motor_rpm_)
+  {
+    throw std::invalid_argument(
+            "min_motor_rpm must be finite and in [0, max_motor_rpm]");
   }
 
 }
@@ -88,9 +92,13 @@ double DiffDriveKinematics::quantize_motor_rpm(double motor_rpm) const
   // round-half-to-even first, then clamp nonzero commands to min/max rpm.
   const double lower = std::floor(motor_rpm);
   const double fraction = motor_rpm - lower;
+  const double half_tolerance =
+    std::numeric_limits<double>::epsilon() *
+    std::max(1.0, std::abs(motor_rpm)) * 8.0;
+  const bool is_half = std::abs(fraction - 0.5) <= half_tolerance;
   double rounded = lower;
-  if (fraction > 0.5 ||
-    (fraction == 0.5 && std::fmod(std::abs(lower), 2.0) == 1.0))
+  if ((!is_half && fraction > 0.5) ||
+    (is_half && std::fmod(std::abs(lower), 2.0) == 1.0))
   {
     rounded = lower + 1.0;
   }

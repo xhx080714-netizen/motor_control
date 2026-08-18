@@ -33,6 +33,7 @@ enum class TransportError
   kOpenFailed,
   kConfigureFailed,
   kTimeout,
+  kInterrupted,
   kPollFailed,
   kIoError,
   kDisconnected,

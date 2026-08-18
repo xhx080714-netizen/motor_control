@@ -59,10 +59,8 @@ def common_execute_arguments(device, extra):
 
 
 MODE_REQUEST = with_crc([0x01, 0x03, 0x00, 0x08, 0x00, 0x01])
-STATE_REQUEST = with_crc([0x01, 0x03, 0x00, 0x00, 0x00, 0x02])
 FULL_STATUS_REQUEST = with_crc([0x01, 0x03, 0x00, 0x00, 0x00, 0x0C])
 MODE_RESPONSE = with_crc([0x01, 0x03, 0x02, 0x00, 0x01])
-STATE_RESPONSE = with_crc([0x01, 0x03, 0x04, 0x01, 0xE1, 0x00, 0x00])
 FULL_STATUS_RESPONSE = with_crc([
     0x01, 0x03, 0x18,
     0x01, 0xE1, 0x00, 0x00,
@@ -72,6 +70,17 @@ FULL_STATUS_RESPONSE = with_crc([
     0x00, 0x01, 0x00, 0xEE,
     0x00, 0x00, 0x01, 0x0F,
 ])
+
+
+def full_status_response_with(register_index, value):
+    payload = bytearray(FULL_STATUS_RESPONSE[:-2])
+    offset = 3 + register_index * 2
+    payload[offset] = (value >> 8) & 0xFF
+    payload[offset + 1] = value & 0xFF
+    return with_crc(payload)
+
+
+ALARM_STATUS_RESPONSE = full_status_response_with(10, 0x0005)
 COAST_FRAME = with_crc([0x01, 0x10, 0x00, 0x00, 0x00, 0x00])
 M1_FORWARD_FRAME = with_crc([0x01, 0x10, 0x01, 0xE1, 0x00, 0x00])
 INITIALIZATION_FRAMES = [
@@ -104,6 +113,19 @@ def answer_read_preflight(master_fd):
                 f"expected {expected.hex(' ')}"
             )
         os.write(master_fd, response)
+
+
+def answer_jog_preflight(master_fd, status_response=None):
+    answer_read_preflight(master_fd)
+    request = read_exact(master_fd, 8, time.monotonic() + 2.0)
+    if request != FULL_STATUS_REQUEST:
+        raise RuntimeError(
+            f"unexpected jog preflight request: {request.hex(' ')}"
+        )
+    os.write(
+        master_fd,
+        FULL_STATUS_RESPONSE if status_response is None else status_response,
+    )
 
 
 def close_process(process, master_fd, slave_fd):
@@ -150,6 +172,32 @@ def test_dry_run(production_executable):
     )
 
 
+def test_50_rpm_company_table_frame(production_executable):
+    process = subprocess.run(
+        [
+            production_executable,
+            "--board", "front",
+            "--motor", "M1",
+            "--direction", "forward",
+            "--rpm", "50",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    expected = with_crc([0x01, 0x10, 0x03, 0x21, 0x00, 0x00])
+    if process.returncode != 0:
+        raise RuntimeError(f"50 rpm dry-run failed:\n{process.stdout}")
+    require_lines(
+        process.stdout,
+        [
+            "rpm=50",
+            "planned_jog=" + " ".join(f"{byte:02X}" for byte in expected),
+        ],
+    )
+
+
 def test_device_mismatch_blocked(production_executable):
     process = subprocess.run(
         [
@@ -173,6 +221,43 @@ def test_device_mismatch_blocked(production_executable):
         [
             "result=BLOCKED",
             "reason=DEVICE_DOES_NOT_MATCH_BOARD_PROFILE",
+            "serial_opened=NO",
+            "write_operations=NOT_EXECUTED",
+        ],
+    )
+
+
+def test_safety_confirmations_required(test_executable):
+    master_fd, slave_fd = pty.openpty()
+    device = os.ttyname(slave_fd)
+    try:
+        process = subprocess.run(
+            [
+                test_executable,
+                "--board", "front",
+                "--motor", "M1",
+                "--direction", "forward",
+                "--device", device,
+                "--execute",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+    finally:
+        os.close(master_fd)
+        os.close(slave_fd)
+    if process.returncode != 3:
+        raise RuntimeError(
+            f"missing confirmations returned {process.returncode}, expected 3:\n"
+            f"{process.stdout}"
+        )
+    require_lines(
+        process.stdout,
+        [
+            "result=BLOCKED",
+            "reason=SAFETY_CONFIRMATIONS_INCOMPLETE",
             "serial_opened=NO",
             "write_operations=NOT_EXECUTED",
         ],
@@ -293,24 +378,30 @@ def test_jog_sequence(test_executable):
         test_executable, ["--motor", "M1", "--direction", "forward"]
     )
     try:
-        answer_read_preflight(master_fd)
-        observed = [
-            read_exact(master_fd, 8, time.monotonic() + 2.0),
-            read_exact(master_fd, 8, time.monotonic() + 2.0),
-        ]
+        answer_jog_preflight(master_fd)
+        pre_coast = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        jog = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        jog_observed_at = time.monotonic()
+        observed = [pre_coast, jog]
         state_request = read_exact(master_fd, 8, time.monotonic() + 2.0)
-        if state_request != STATE_REQUEST:
+        if state_request != FULL_STATUS_REQUEST:
             raise RuntimeError(
                 f"unexpected state request: {state_request.hex(' ')}"
             )
-        os.write(master_fd, STATE_RESPONSE)
+        os.write(master_fd, FULL_STATUS_RESPONSE)
         observed.append(read_exact(master_fd, 8, time.monotonic() + 2.0))
+        coast_observed_at = time.monotonic()
         output, _ = process.communicate(timeout=2.0)
     finally:
         close_process(process, master_fd, slave_fd)
     if observed != [COAST_FRAME, M1_FORWARD_FRAME, COAST_FRAME]:
         raise RuntimeError(
             "unexpected jog sequence: " + ", ".join(x.hex(" ") for x in observed)
+        )
+    jog_duration = coast_observed_at - jog_observed_at
+    if not 0.20 <= jog_duration <= 0.40:
+        raise RuntimeError(
+            f"jog duration {jog_duration:.3f}s outside safe test tolerance"
         )
     if process.returncode != 0:
         raise RuntimeError(f"jog failed ({process.returncode}):\n{output}")
@@ -325,6 +416,156 @@ def test_jog_sequence(test_executable):
             "final_coast_write=OK",
             "final_coast_result=OK",
             "result=OK",
+        ],
+    )
+
+
+def test_preflight_alarm_blocks_all_writes(test_executable):
+    process, master_fd, slave_fd = start_pty_process(
+        test_executable, ["--motor", "M1", "--direction", "forward"]
+    )
+    try:
+        answer_jog_preflight(master_fd, ALARM_STATUS_RESPONSE)
+        output, _ = process.communicate(timeout=2.0)
+    finally:
+        close_process(process, master_fd, slave_fd)
+    if process.returncode != 5:
+        raise RuntimeError(
+            f"preflight alarm returned {process.returncode}, expected 5:\n{output}"
+        )
+    require_lines(
+        output,
+        [
+            "alarm_code_raw=0x0005",
+            "result=BLOCKED",
+            "reason=PREFLIGHT_STATUS_NOT_SAFE",
+            "write_operations=NOT_EXECUTED",
+        ],
+    )
+
+
+def test_active_alarm_coasts_and_fails(test_executable):
+    process, master_fd, slave_fd = start_pty_process(
+        test_executable, ["--motor", "M1", "--direction", "forward"]
+    )
+    try:
+        answer_jog_preflight(master_fd)
+        pre_coast = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        jog = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        request = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        if request != FULL_STATUS_REQUEST:
+            raise RuntimeError(f"unexpected active request: {request.hex(' ')}")
+        os.write(master_fd, ALARM_STATUS_RESPONSE)
+        final_coast = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        output, _ = process.communicate(timeout=2.0)
+    finally:
+        close_process(process, master_fd, slave_fd)
+    if pre_coast != COAST_FRAME or jog != M1_FORWARD_FRAME:
+        raise RuntimeError("unexpected frames before active alarm")
+    if final_coast != COAST_FRAME:
+        raise RuntimeError("active alarm did not end with Coast")
+    if process.returncode != 6:
+        raise RuntimeError(
+            f"active alarm returned {process.returncode}, expected 6:\n{output}"
+        )
+    require_lines(
+        output,
+        [
+            "alarm_code_raw=0x0005",
+            "validation=UNSAFE_STATUS",
+            "final_coast_result=OK",
+            "result=ERROR",
+        ],
+    )
+
+
+def test_active_status_timeout_coasts_by_deadline(test_executable):
+    process, master_fd, slave_fd = start_pty_process(
+        test_executable, ["--motor", "M1", "--direction", "forward"]
+    )
+    try:
+        answer_jog_preflight(master_fd)
+        pre_coast = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        jog = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        jog_observed_at = time.monotonic()
+        status_request = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        final_coast = read_exact(master_fd, 8, time.monotonic() + 1.0)
+        coast_observed_at = time.monotonic()
+        output, _ = process.communicate(timeout=2.0)
+    finally:
+        close_process(process, master_fd, slave_fd)
+
+    if pre_coast != COAST_FRAME or jog != M1_FORWARD_FRAME:
+        raise RuntimeError("unexpected sequence before active-status timeout")
+    if status_request != FULL_STATUS_REQUEST:
+        raise RuntimeError(
+            f"unexpected active-status request: {status_request.hex(' ')}"
+        )
+    if final_coast != COAST_FRAME:
+        raise RuntimeError("active-status timeout did not end with Coast")
+    jog_duration = coast_observed_at - jog_observed_at
+    if not 0.20 <= jog_duration <= 0.40:
+        raise RuntimeError(
+            f"timeout Coast arrived after {jog_duration:.3f}s, expected about 0.300s"
+        )
+    if process.returncode != 6:
+        raise RuntimeError(
+            f"active-status timeout returned {process.returncode}, expected 6:\n{output}"
+        )
+    require_lines(
+        output,
+        [
+            "stage=active_status",
+            "transaction_error=transaction timeout",
+            "final_coast_write=OK",
+            "final_coast_result=OK",
+            "result=ERROR",
+        ],
+    )
+
+
+def test_interrupt_during_active_status_coasts_immediately(test_executable):
+    process, master_fd, slave_fd = start_pty_process(
+        test_executable, ["--motor", "M1", "--direction", "forward"]
+    )
+    try:
+        answer_jog_preflight(master_fd)
+        pre_coast = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        jog = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        status_request = read_exact(master_fd, 8, time.monotonic() + 2.0)
+        signal_sent_at = time.monotonic()
+        process.send_signal(signal.SIGINT)
+        final_coast = read_exact(master_fd, 8, time.monotonic() + 1.0)
+        coast_observed_at = time.monotonic()
+        output, _ = process.communicate(timeout=2.0)
+    finally:
+        close_process(process, master_fd, slave_fd)
+
+    if pre_coast != COAST_FRAME or jog != M1_FORWARD_FRAME:
+        raise RuntimeError("unexpected sequence before active-status SIGINT")
+    if status_request != FULL_STATUS_REQUEST:
+        raise RuntimeError(
+            f"unexpected active-status request: {status_request.hex(' ')}"
+        )
+    if final_coast != COAST_FRAME:
+        raise RuntimeError("active-status SIGINT did not end with Coast")
+    interrupt_latency = coast_observed_at - signal_sent_at
+    if interrupt_latency > 0.15:
+        raise RuntimeError(
+            f"SIGINT Coast latency {interrupt_latency:.3f}s exceeded 0.150s"
+        )
+    if process.returncode != 130:
+        raise RuntimeError(
+            f"active-status SIGINT returned {process.returncode}, expected 130:\n{output}"
+        )
+    require_lines(
+        output,
+        [
+            "stage=active_status",
+            "transaction_error=transport error",
+            "final_coast_write=OK",
+            "final_coast_result=OK",
+            "result=ERROR",
         ],
     )
 
@@ -416,13 +657,12 @@ def test_initialize_interrupt_coasts(test_executable):
             )
         process.send_signal(signal.SIGINT)
         os.write(master_fd, MODE_RESPONSE)
-        pre_coast = read_exact(master_fd, 8, time.monotonic() + 2.0)
         final_coast = read_exact(master_fd, 8, time.monotonic() + 2.0)
         output, _ = process.communicate(timeout=2.0)
     finally:
         close_process(process, master_fd, slave_fd)
-    if pre_coast != COAST_FRAME or final_coast != COAST_FRAME:
-        raise RuntimeError("initialize SIGINT did not remain in Coast")
+    if final_coast != COAST_FRAME:
+        raise RuntimeError("initialize preflight SIGINT did not end with Coast")
     if process.returncode != 130:
         raise RuntimeError(
             f"initialize interrupt returned {process.returncode}, expected 130:\n"
@@ -444,7 +684,7 @@ def test_interrupt_coasts(test_executable):
         test_executable, ["--motor", "M1", "--direction", "forward"]
     )
     try:
-        answer_read_preflight(master_fd)
+        answer_jog_preflight(master_fd)
         pre_coast = read_exact(master_fd, 8, time.monotonic() + 2.0)
         jog = read_exact(master_fd, 8, time.monotonic() + 2.0)
         if pre_coast != COAST_FRAME or jog != M1_FORWARD_FRAME:
@@ -475,11 +715,17 @@ def main():
     production_executable = sys.argv[1]
     test_executable = sys.argv[2]
     test_dry_run(production_executable)
+    test_50_rpm_company_table_frame(production_executable)
     test_device_mismatch_blocked(production_executable)
+    test_safety_confirmations_required(test_executable)
     test_initialize_dry_run(production_executable)
     test_status_only(test_executable)
     test_coast_only(test_executable)
     test_jog_sequence(test_executable)
+    test_preflight_alarm_blocks_all_writes(test_executable)
+    test_active_alarm_coasts_and_fails(test_executable)
+    test_active_status_timeout_coasts_by_deadline(test_executable)
+    test_interrupt_during_active_status_coasts_immediately(test_executable)
     test_interrupt_coasts(test_executable)
     test_initialize_sequence(test_executable)
     test_initialize_preflight_timeout(test_executable)

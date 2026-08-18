@@ -18,9 +18,9 @@ public:
   : Node("chassis_controller")
   {
     const double wheel_radius_m =
-      declare_parameter<double>("wheel_radius_m", 0.135);
+      declare_parameter<double>("wheel_radius_m", 0.134665);
     const double effective_track_width_m =
-      declare_parameter<double>("effective_track_width_m", 0.54);
+      declare_parameter<double>("effective_track_width_m", 0.53907);
     const double gear_ratio = declare_parameter<double>("gear_ratio", 7.5);
     const double max_motor_rpm = declare_parameter<double>("max_motor_rpm", 1500.0);
     const double min_motor_rpm = declare_parameter<double>("min_motor_rpm", 30.0);
@@ -28,16 +28,24 @@ public:
     control_rate_hz_ = declare_parameter<double>("control_rate_hz", 50.0);
     cmd_timeout_sec_ = declare_parameter<double>("cmd_timeout_sec", 0.5);
     max_linear_speed_mps_ =
-      std::abs(declare_parameter<double>("max_linear_speed_mps", 0.15));
+      declare_parameter<double>("max_linear_speed_mps", 0.15);
     max_angular_speed_rps_ =
-      std::abs(declare_parameter<double>("max_angular_speed_rps", 0.8));
+      declare_parameter<double>("max_angular_speed_rps", 0.8);
     max_linear_accel_mps2_ =
-      std::abs(declare_parameter<double>("max_linear_accel_mps2", 0.30));
+      declare_parameter<double>("max_linear_accel_mps2", 0.30);
     max_angular_accel_rps2_ =
-      std::abs(declare_parameter<double>("max_angular_accel_rps2", 1.5));
+      declare_parameter<double>("max_angular_accel_rps2", 1.5);
 
-    if (control_rate_hz_ <= 0.0 || cmd_timeout_sec_ <= 0.0) {
-      throw std::invalid_argument("control rate and command timeout must be positive");
+    if (!std::isfinite(control_rate_hz_) || control_rate_hz_ <= 0.0 ||
+      !std::isfinite(cmd_timeout_sec_) || cmd_timeout_sec_ <= 0.0 ||
+      !std::isfinite(max_linear_speed_mps_) || max_linear_speed_mps_ <= 0.0 ||
+      !std::isfinite(max_angular_speed_rps_) || max_angular_speed_rps_ <= 0.0 ||
+      !std::isfinite(max_linear_accel_mps2_) || max_linear_accel_mps2_ <= 0.0 ||
+      !std::isfinite(max_angular_accel_rps2_) || max_angular_accel_rps2_ <= 0.0)
+    {
+      throw std::invalid_argument(
+              "control rate, timeout, speed limits, and acceleration limits "
+              "must be finite and positive");
     }
 
     kinematics_ = std::make_unique<sand_rake_control::DiffDriveKinematics>(

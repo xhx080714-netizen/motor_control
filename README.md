@@ -7,11 +7,7 @@ ROS 2 Humble 小车底盘工程。本目录只保留小车有效源码、配置�
 
 - `src/sand_rake_control`：遥控、安全裁决、小车运动学以及不连接真车的 Mock 仿真。
 - `src/sand_rake_hw_tools`：受限的小车双板双电机实车诊断/点动工具。
-- `src/sand_rake_bringup`：从主分支同步并去除失效依赖后的系统启动、TF 和 RViz 包。
-- `src/sand_rake_interfaces`：团队共享的 ROS 2 消息接口和测试发布器。
-- `src/sand_rake_perception`：团队激光感知包骨架（当前 BLOCKED）。
-- `src/sand_rake_vision`：团队相机与 RKNN 视觉包骨架。
-- `src/sand_rake_tools`：团队通用工具包；录包入口为 `scripts/record_demo.sh`。
+- `src/sand_rake_interfaces`：底盘安全控制所依赖的 `SafetyEvent` 消息接口。
 - 公司《第四版.doc》前部寄存器表：唯一寄存器与控制字依据（外部受控文件，不随仓库发布）。
 - `docs/小车控制命令操作手册.md`：现场人员可逐步执行的构建、检查、初始化和单轮点动流程。
 - `docs/小车follow_iou双板双电机实车测试记录_2026-08-15.md`：原始实车结果与证据边界。
@@ -27,49 +23,36 @@ JP17=`/dev/ttyS6`，后板 JP18=`/dev/ttyS1`；每块板接收固定 8 字节自
 ```bash
 source /opt/ros/humble/setup.bash
 
-CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --symlink-install \
+MAKEFLAGS="-j1" CMAKE_BUILD_PARALLEL_LEVEL=1 \
+  colcon build --symlink-install \
   --executor sequential --parallel-workers 1 \
   --packages-select sand_rake_interfaces
 
 source install/setup.bash
-CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --symlink-install \
+MAKEFLAGS="-j1" CMAKE_BUILD_PARALLEL_LEVEL=1 \
+  colcon build --symlink-install \
   --executor sequential --parallel-workers 1 \
   --packages-select sand_rake_control
 
 source install/setup.bash
-CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --symlink-install \
+MAKEFLAGS="-j1" CMAKE_BUILD_PARALLEL_LEVEL=1 \
+  colcon build --symlink-install \
   --executor sequential --parallel-workers 1 \
   --packages-select sand_rake_hw_tools
 
 source install/setup.bash
-CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --symlink-install \
-  --executor sequential --parallel-workers 1 \
-  --packages-select sand_rake_bringup
-
-source install/setup.bash
-CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --symlink-install \
-  --executor sequential --parallel-workers 1 \
-  --packages-select sand_rake_perception
-
-source install/setup.bash
-CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --symlink-install \
-  --executor sequential --parallel-workers 1 \
-  --packages-select sand_rake_vision
-
-source install/setup.bash
-CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --symlink-install \
-  --executor sequential --parallel-workers 1 \
-  --packages-select sand_rake_tools
-
-source install/setup.bash
-colcon test --executor sequential --parallel-workers 1 \
-  --packages-select sand_rake_interfaces sand_rake_control \
-  sand_rake_hw_tools sand_rake_bringup sand_rake_perception \
-  sand_rake_vision sand_rake_tools
+CTEST_PARALLEL_LEVEL=1 colcon test --executor sequential --parallel-workers 1 --packages-select sand_rake_interfaces sand_rake_control sand_rake_hw_tools
 colcon test-result --verbose
 ```
 
-七个包必须按上述顺序逐个构建，不要并行启动多条命令。
+这是完全串行构建：`colcon` 一次只处理一个包，CMake、Make 或 Ninja 在包内也
+只能运行一个编译任务。三个包必须按上述顺序逐个构建，不要并行启动多条命令。
+
+## Scope
+
+本仓库只负责小车电机驱动和底盘控制。感知、视觉、相机/雷达 bringup、通用录包
+工具及其团队协作文档不属于本仓库范围，已从本地工作树剔除。`main` 远端分支
+保持只读，以上清理没有修改远端内容。
 
 ## Hardware safety boundary
 
@@ -95,8 +78,14 @@ ros2 run sand_rake_control teleop_node --ros-args \
   --params-file src/sand_rake_control/config/small_vehicle.yaml
 ```
 
-Current hardware status (2026-08-16): both boards completed the five-step
-initialization sequence, report FOLLOW from read register
-`0x0008`, and were returned to Coast. A subsequent front/M1 30 rpm command was
-read back from the raw state area; its physical wheel result was not recorded.
-Wheel mapping and direction remain unfrozen.
+Current hardware status (2026-08-17): the RK3576 source has been updated and
+built serially. Both boards completed the five-step initialization, report
+FOLLOW, no alarm, and firmware version `0x0004`. Coast releases all four wheels,
+but low-speed commands have produced no mechanical motion. During the latest
+front/M1 50 rpm test, a full status sample started about 50 ms after the write
+(read latency about 5.6 ms) and showed both
+command states, Hall counts, and feedback speeds at zero, with a stable 27.0 V
+bus and no alarm. No tty owner or other ROS node was found. Before more motion
+tests, confirm with the vendor that firmware `0x0004` matches the company table
+and whether a separate hardware/protocol enable is required. Wheel mapping and
+direction remain unfrozen.
